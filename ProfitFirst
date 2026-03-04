@@ -1,0 +1,321 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// FVG PROFIT FIRST — Dual Stochastic + Fair Value Gap Retest Strategy
+// Built for scalping — 5min chart, 15min stoch confirmation, FVG break-retest-move entry
+// Target: Consistent 15% pull, disciplined entries only
+
+//@version=6
+indicator("FVG PROFIT FIRST — Dual Stoch + FVG Retest", overlay=true, max_lines_count=500, max_labels_count=500, max_boxes_count=500)
+
+// ═══════════════════════════════════════════════════════════════
+//  STRATEGY LOGIC:
+//  1. 15-min Stochastic sets the BIAS (overbought = short bias, oversold = long bias)
+//  2. 5-min Stochastic confirms the TIMING (must agree with 15-min bias)
+//  3. A Fair Value Gap forms from an aggressive move (3-candle imbalance)
+//  4. Price BREAKS above/below the FVG
+//  5. Price RETESTS back into the FVG
+//  6. Entry fires on retest candle — direction matches stoch bias
+//  7. ATR-based SL and TP drawn automatically (tuned for 15% profit target model)
+// ═══════════════════════════════════════════════════════════════
+
+// ─────────────────── STOCHASTIC INPUTS ───────────────────
+stochK        = input.int(13,  "Stoch K Length",    minval=1,  group="Stochastic Settings")
+stochD        = input.int(3,   "Stoch D Smoothing", minval=1,  group="Stochastic Settings")
+stochSmooth   = input.int(3,   "Stoch Smoothing",   minval=1,  group="Stochastic Settings")
+
+// Scalping-optimized levels:
+// 80/20 is too wide for fast 5-min scalps — we use 75/28 so signals fire
+// slightly earlier, catching momentum before the crowd piles in
+obLevel       = input.int(75,  "Overbought Level (Short Bias)", minval=50, maxval=100, group="Stochastic Settings")
+osLevel       = input.int(28,  "Oversold Level (Long Bias)",    minval=0,  maxval=50,  group="Stochastic Settings")
+
+// ─────────────────── FVG INPUTS ───────────────────
+fvgMinSize    = input.float(0.1, "Min FVG Size (% of price)", step=0.01, minval=0.01, group="Fair Value Gap")
+showFVGBoxes  = input.bool(true, "Show FVG Zones on Chart",   group="Fair Value Gap")
+fvgExpiry     = input.int(50,    "FVG Expiry (bars)",         minval=5,  group="Fair Value Gap")
+retestBuffer  = input.float(0.1, "Retest Buffer % (tolerance)", step=0.01, group="Fair Value Gap")
+
+// ─────────────────── RISK MANAGEMENT ───────────────────
+atrLen        = input.int(14,   "ATR Length",              group="Risk Management")
+slMult        = input.float(1.2,"Stop Loss ATR Mult",  step=0.1, group="Risk Management")
+tpMult        = input.float(2.5,"Take Profit ATR Mult", step=0.1, group="Risk Management")
+// Note: SL 1.2x / TP 2.5x gives ~2:1 R:R minimum — aligned with 15% profit model
+// You only need ~40% win rate to be profitable at this ratio
+
+// ─────────────────── DISPLAY ───────────────────
+showStochPanel = input.bool(true, "Show Stochastic Status Table", group="Display")
+showSignals    = input.bool(true, "Show Entry Signals",            group="Display")
+showSLTP       = input.bool(true, "Show SL/TP Lines",              group="Display")
+
+// ─────────────────── ATR ───────────────────
+atr = ta.atr(atrLen)
+
+// ═══════════════════════════════════════════════════════════════
+//  STOCHASTIC — DUAL TIMEFRAME
+//  5-min  = current chart (timing)
+//  15-min = higher timeframe (bias/direction)
+// ═══════════════════════════════════════════════════════════════
+
+// Current TF (5-min) stochastic
+k5  = ta.sma(ta.stoch(close, high, low, stochK), stochSmooth)
+d5  = ta.sma(k5, stochD)
+
+// 15-min stochastic pulled via request.security
+k15 = request.security(syminfo.tickerid, "15", ta.sma(ta.stoch(close, high, low, stochK), stochSmooth), lookahead=barmerge.lookahead_off)
+d15 = request.security(syminfo.tickerid, "15", ta.sma(ta.sma(ta.stoch(close, high, low, stochK), stochSmooth), stochD), lookahead=barmerge.lookahead_off)
+
+// Bias from 15-min
+htfLongBias  = k15 < osLevel  // 15-min oversold  → look for longs
+htfShortBias = k15 > obLevel  // 15-min overbought → look for shorts
+
+// Timing confirmation from 5-min
+// For longs: 5-min K crosses above D while in oversold territory or rising from it
+// For shorts: 5-min K crosses below D while in overbought territory or falling
+entryLongStoch  = k5 < (osLevel + 15) and ta.crossover(k5, d5)
+entryShortStoch = k5 > (obLevel - 15) and ta.crossunder(k5, d5)
+
+// Combined stoch signal
+stochLong  = htfLongBias  and entryLongStoch
+stochShort = htfShortBias and entryShortStoch
+
+// ═══════════════════════════════════════════════════════════════
+//  FAIR VALUE GAP DETECTION
+//  A FVG is a 3-candle pattern where candle 1 and candle 3 don't overlap
+//  Bullish FVG: high[2] < low[0]  (gap between candle 3 low and candle 1 high)
+//  Bearish FVG: low[2]  > high[0] (gap between candle 3 high and candle 1 low)
+//  The gap zone is the imbalance — price tends to return and retest it
+// ═══════════════════════════════════════════════════════════════
+
+minFVGPoints = close * fvgMinSize / 100
+
+// Bullish FVG — gap left above (price moved up aggressively)
+bullFVG     = low[0] > high[2] and (low[0] - high[2]) >= minFVGPoints
+bullFVGTop  = low[0]   // top of bullish FVG zone
+bullFVGBot  = high[2]  // bottom of bullish FVG zone
+
+// Bearish FVG — gap left below (price moved down aggressively)
+bearFVG     = high[0] < low[2] and (low[2] - high[0]) >= minFVGPoints
+bearFVGTop  = low[2]   // top of bearish FVG zone
+bearFVGBot  = high[0]  // bottom of bearish FVG zone
+
+// ─────────────────── FVG ZONE STORAGE ───────────────────
+// Store active FVG zones so we can track retests over multiple bars
+var float[] bFVG_top  = array.new_float(0)
+var float[] bFVG_bot  = array.new_float(0)
+var int[]   bFVG_bar  = array.new_int(0)
+var bool[]  bFVG_hit  = array.new_bool(0)   // has it been broken above?
+var bool[]  bFVG_used = array.new_bool(0)   // has it fired an entry?
+
+var float[] sFVG_top  = array.new_float(0)
+var float[] sFVG_bot  = array.new_float(0)
+var int[]   sFVG_bar  = array.new_int(0)
+var bool[]  sFVG_hit  = array.new_bool(0)   // has it been broken below?
+var bool[]  sFVG_used = array.new_bool(0)
+
+// Add new FVGs to arrays
+if bullFVG
+    array.push(bFVG_top,  bullFVGTop)
+    array.push(bFVG_bot,  bullFVGBot)
+    array.push(bFVG_bar,  bar_index)
+    array.push(bFVG_hit,  false)
+    array.push(bFVG_used, false)
+
+    if showFVGBoxes
+        box.new(bar_index - 2, bullFVGTop, bar_index + fvgExpiry, bullFVGBot,
+            border_color=color.new(color.green, 40),
+            bgcolor=color.new(color.green, 85),
+            border_width=1)
+
+if bearFVG
+    array.push(sFVG_top,  bearFVGTop)
+    array.push(sFVG_bot,  bearFVGBot)
+    array.push(sFVG_bar,  bar_index)
+    array.push(sFVG_hit,  false)
+    array.push(sFVG_used, false)
+
+    if showFVGBoxes
+        box.new(bar_index - 2, bearFVGTop, bar_index + fvgExpiry, bearFVGBot,
+            border_color=color.new(color.red, 40),
+            bgcolor=color.new(color.red, 85),
+            border_width=1)
+
+// ═══════════════════════════════════════════════════════════════
+//  BREAK → RETEST → ENTRY LOGIC
+//
+//  BULLISH:
+//    Step 1 — FVG forms (bullish imbalance gap)
+//    Step 2 — Price breaks ABOVE the top of the FVG (confirms move)
+//    Step 3 — Price pulls BACK DOWN into the FVG zone (retest)
+//    Step 4 — Stoch confirms long bias → LONG ENTRY
+//
+//  BEARISH:
+//    Step 1 — FVG forms (bearish imbalance gap)
+//    Step 2 — Price breaks BELOW the bottom of the FVG (confirms move)
+//    Step 3 — Price pulls BACK UP into the FVG zone (retest)
+//    Step 4 — Stoch confirms short bias → SHORT ENTRY
+// ═══════════════════════════════════════════════════════════════
+
+longEntry  = false
+shortEntry = false
+bufferPct  = retestBuffer / 100
+
+// ─── Check Bullish FVGs ───
+if array.size(bFVG_top) > 0
+    for i = array.size(bFVG_top) - 1 to 0
+        age  = bar_index - array.get(bFVG_bar, i)
+        used = array.get(bFVG_used, i)
+        hit  = array.get(bFVG_hit, i)
+        top  = array.get(bFVG_top, i)
+        bot  = array.get(bFVG_bot, i)
+
+        // Expire old FVGs
+        if age > fvgExpiry or used
+            array.remove(bFVG_top,  i)
+            array.remove(bFVG_bot,  i)
+            array.remove(bFVG_bar,  i)
+            array.remove(bFVG_hit,  i)
+            array.remove(bFVG_used, i)
+            continue
+
+        // Step 2: Mark as broken above if price has cleared the top
+        if not hit and high > top
+            array.set(bFVG_hit, i, true)
+
+        // Step 3 + 4: Retest into FVG after break, with stoch confirmation
+        retestZoneTop = top * (1 + bufferPct)
+        retestZoneBot = bot * (1 - bufferPct)
+        inRetest = array.get(bFVG_hit, i) and low <= retestZoneTop and high >= retestZoneBot
+
+        if inRetest and stochLong and not used
+            longEntry := true
+            array.set(bFVG_used, i, true)
+
+// ─── Check Bearish FVGs ───
+if array.size(sFVG_top) > 0
+    for i = array.size(sFVG_top) - 1 to 0
+        age  = bar_index - array.get(sFVG_bar, i)
+        used = array.get(sFVG_used, i)
+        hit  = array.get(sFVG_hit, i)
+        top  = array.get(sFVG_top, i)
+        bot  = array.get(sFVG_bot, i)
+
+        if age > fvgExpiry or used
+            array.remove(sFVG_top,  i)
+            array.remove(sFVG_bot,  i)
+            array.remove(sFVG_bar,  i)
+            array.remove(sFVG_hit,  i)
+            array.remove(sFVG_used, i)
+            continue
+
+        // Step 2: Mark as broken below if price has cleared the bottom
+        if not hit and low < bot
+            array.set(sFVG_hit, i, true)
+
+        // Step 3 + 4: Retest into FVG after break, with stoch confirmation
+        retestZoneTop = top * (1 + bufferPct)
+        retestZoneBot = bot * (1 - bufferPct)
+        inRetest = array.get(sFVG_hit, i) and high >= retestZoneBot and low <= retestZoneTop
+
+        if inRetest and stochShort and not used
+            shortEntry := true
+            array.set(sFVG_used, i, true)
+
+// ═══════════════════════════════════════════════════════════════
+//  ENTRY LABELS + SL/TP
+// ═══════════════════════════════════════════════════════════════
+
+if longEntry and showSignals
+    label.new(bar_index, low - atr * 0.5,
+        "LONG ▲\nFVG Retest",
+        style=label.style_label_up,
+        color=color.new(color.green, 10),
+        textcolor=color.white,
+        size=size.normal)
+
+    if showSLTP
+        slPrice = close - atr * slMult
+        tpPrice = close + atr * tpMult
+        line.new(bar_index, slPrice, bar_index + 10, slPrice, color=color.red,   width=1, style=line.style_dashed)
+        line.new(bar_index, tpPrice, bar_index + 10, tpPrice, color=color.green, width=1, style=line.style_dashed)
+        label.new(bar_index + 11, slPrice, "SL", style=label.style_label_left, color=color.red,           textcolor=color.white, size=size.small)
+        label.new(bar_index + 11, tpPrice, "TP (" + str.tostring(tpMult / slMult, "#.##") + "R)", style=label.style_label_left, color=color.green, textcolor=color.white, size=size.small)
+
+if shortEntry and showSignals
+    label.new(bar_index, high + atr * 0.5,
+        "SHORT ▼\nFVG Retest",
+        style=label.style_label_down,
+        color=color.new(color.red, 10),
+        textcolor=color.white,
+        size=size.normal)
+
+    if showSLTP
+        slPrice = close + atr * slMult
+        tpPrice = close - atr * tpMult
+        line.new(bar_index, slPrice, bar_index + 10, slPrice, color=color.red,   width=1, style=line.style_dashed)
+        line.new(bar_index, tpPrice, bar_index + 10, tpPrice, color=color.green, width=1, style=line.style_dashed)
+        label.new(bar_index + 11, slPrice, "SL", style=label.style_label_left, color=color.red,           textcolor=color.white, size=size.small)
+        label.new(bar_index + 11, tpPrice, "TP (" + str.tostring(tpMult / slMult, "#.##") + "R)", style=label.style_label_left, color=color.green, textcolor=color.white, size=size.small)
+
+// ═══════════════════════════════════════════════════════════════
+//  STOCHASTIC VISUAL (inline mini-panel using plot offset)
+//  Plotted as lines below price for visual reference
+// ═══════════════════════════════════════════════════════════════
+// Stoch lines are plotted in a separate pane — add this indicator
+// to its own pane or use the table below to read values
+
+// ─────────────────── STATUS TABLE ───────────────────
+var table dash = table.new(position.top_right, 2, 8, border_width=1, border_color=color.gray)
+
+if barstate.islast and showStochPanel
+    // Header
+    table.cell(dash, 0, 0, "FVG PROFIT FIRST",   bgcolor=color.navy,  textcolor=color.white, text_halign=text.align_center)
+    table.cell(dash, 1, 0, "STATUS",              bgcolor=color.navy,  textcolor=color.white, text_halign=text.align_center)
+
+    // 15-min Stoch
+    table.cell(dash, 0, 1, "15m Stoch K",         bgcolor=color.gray)
+    table.cell(dash, 1, 1, str.tostring(math.round(k15, 2)),
+        bgcolor = k15 < osLevel ? color.green : k15 > obLevel ? color.red : color.new(color.gray, 30),
+        textcolor = color.white)
+
+    // 5-min Stoch
+    table.cell(dash, 0, 2, "5m Stoch K",          bgcolor=color.gray)
+    table.cell(dash, 1, 2, str.tostring(math.round(k5, 2)),
+        bgcolor = k5 < osLevel ? color.green : k5 > obLevel ? color.red : color.new(color.gray, 30),
+        textcolor = color.white)
+
+    // Bias
+    table.cell(dash, 0, 3, "HTF Bias",            bgcolor=color.gray)
+    table.cell(dash, 1, 3,
+        htfLongBias ? "LONG BIAS" : htfShortBias ? "SHORT BIAS" : "NEUTRAL",
+        bgcolor = htfLongBias ? color.green : htfShortBias ? color.red : color.orange,
+        textcolor = color.white)
+
+    // Stoch Timing
+    table.cell(dash, 0, 4, "5m Timing",           bgcolor=color.gray)
+    table.cell(dash, 1, 4,
+        entryLongStoch ? "LONG ✓" : entryShortStoch ? "SHORT ✓" : "WAITING",
+        bgcolor = entryLongStoch ? color.green : entryShortStoch ? color.red : color.new(color.gray, 30),
+        textcolor = color.white)
+
+    // Active FVG count
+    table.cell(dash, 0, 5, "Bull FVGs Active",    bgcolor=color.gray)
+    table.cell(dash, 1, 5, str.tostring(array.size(bFVG_top)),
+        bgcolor = array.size(bFVG_top) > 0 ? color.new(color.green, 50) : color.new(color.gray, 30),
+        textcolor = color.white)
+
+    table.cell(dash, 0, 6, "Bear FVGs Active",    bgcolor=color.gray)
+    table.cell(dash, 1, 6, str.tostring(array.size(sFVG_top)),
+        bgcolor = array.size(sFVG_top) > 0 ? color.new(color.red, 50) : color.new(color.gray, 30),
+        textcolor = color.white)
+
+    // Signal ready
+    table.cell(dash, 0, 7, "SIGNAL READY",        bgcolor=color.gray)
+    table.cell(dash, 1, 7,
+        longEntry ? "LONG ENTRY ▲" : shortEntry ? "SHORT ENTRY ▼" : "NONE",
+        bgcolor = longEntry ? color.green : shortEntry ? color.red : color.new(color.gray, 50),
+        textcolor = color.white)
+
+// ═══════════════════════════════════════════════════════════════
+//  ALERTS
+// ═══════════════════════════════════════════════════════════════
+alertcondition(longEntry,  "FVG Long Entry",  "LONG — FVG Retest confirmed with dual stoch alignment")
+alertcondition(shortEntry, "FVG Short Entry", "SHORT — FVG Retest confirmed with dual stoch alignment")
