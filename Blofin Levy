@@ -1,0 +1,120 @@
+// ============================================================
+// SOL-USDT Futures Signal Bot for BloFin
+// Pine Script v6 — TradingView Signal Bot (One-Way Mode)
+// Strategy: EMA Cross + RSI Filter + ATR Stop/TP
+// Recommended Timeframe: 15m or 1H
+// ============================================================
+
+//@version=6
+strategy(
+     title                   = "SOL BloFin Signal Bot [EMA+RSI+ATR]",
+     shorttitle               = "SOL-BloFin",
+     overlay                 = true,
+     pyramiding              = 0,
+     default_qty_type        = strategy.fixed,
+     default_qty_value       = 1,
+     initial_capital         = 1000,
+     margin_long             = 100,
+     margin_short            = 100,
+     commission_type         = strategy.commission.percent,
+     commission_value        = 0.05,
+     process_orders_on_close = false
+ )
+
+// ─────────────────────────────────────────────────────────────
+// INPUTS
+// ─────────────────────────────────────────────────────────────
+grpEma  = "EMA Settings"
+emaFast = input.int(9,    "Fast EMA Period", minval=2, group=grpEma)
+emaSlow = input.int(21,   "Slow EMA Period", minval=3, group=grpEma)
+
+grpRsi  = "RSI Filter"
+rsiLen  = input.int(14,  "RSI Length",                          minval=2,  group=grpRsi)
+rsiOB   = input.int(65,  "Overbought — skip longs above this", minval=50, maxval=90, group=grpRsi)
+rsiOS   = input.int(35,  "Oversold  — skip shorts below this", minval=10, maxval=50, group=grpRsi)
+
+grpRisk = "Risk Management"
+atrLen  = input.int(14,    "ATR Length",         minval=1,  group=grpRisk)
+slMult  = input.float(1.5, "Stop Loss  × ATR",   step=0.1,  group=grpRisk)
+tpMult  = input.float(3.0, "Take Profit × ATR",  step=0.1,  group=grpRisk)
+
+grpTime = "Trade Window (UTC)"
+useTime = input.bool(false, "Restrict to time window?", group=grpTime)
+startH  = input.int(0,  "Start Hour (0-23)", minval=0, maxval=23, group=grpTime)
+endH    = input.int(23, "End Hour   (0-23)", minval=0, maxval=23, group=grpTime)
+
+// ─────────────────────────────────────────────────────────────
+// INDICATORS
+// ─────────────────────────────────────────────────────────────
+float emaF = ta.ema(close, emaFast)
+float emaS = ta.ema(close, emaSlow)
+float rsi  = ta.rsi(close, rsiLen)
+float atr  = ta.atr(atrLen)
+
+// ─────────────────────────────────────────────────────────────
+// TIME FILTER
+// ─────────────────────────────────────────────────────────────
+bool inWindow = not useTime or (hour >= startH and hour <= endH)
+
+// ─────────────────────────────────────────────────────────────
+// ENTRY CONDITIONS
+// ─────────────────────────────────────────────────────────────
+bool longCondition  = ta.crossover(emaF, emaS)  and rsi < rsiOB and inWindow
+bool shortCondition = ta.crossunder(emaF, emaS) and rsi > rsiOS and inWindow
+
+// ─────────────────────────────────────────────────────────────
+// STRATEGY EXECUTION — One-Way mode (flip on new signal)
+// Note: v6 removed the `when` parameter; use if blocks instead
+// ─────────────────────────────────────────────────────────────
+if longCondition
+    if strategy.position_size < 0
+        strategy.close("Short", comment="Flip to Long")
+    strategy.entry("Long", strategy.long, comment="BloFin Long")
+    strategy.exit("Long TP/SL", from_entry="Long",
+         stop  = strategy.position_avg_price - atr * slMult,
+         limit = strategy.position_avg_price + atr * tpMult)
+
+if shortCondition
+    if strategy.position_size > 0
+        strategy.close("Long", comment="Flip to Short")
+    strategy.entry("Short", strategy.short, comment="BloFin Short")
+    strategy.exit("Short TP/SL", from_entry="Short",
+         stop  = strategy.position_avg_price + atr * slMult,
+         limit = strategy.position_avg_price - atr * tpMult)
+
+// ─────────────────────────────────────────────────────────────
+// VISUALS — v6 requires bgcolor color arg resolved before call
+// ─────────────────────────────────────────────────────────────
+color emaFastColor = emaF > emaS ? color.new(color.aqua, 0) : color.new(color.orange, 0)
+plot(emaF, "Fast EMA", color=emaFastColor, linewidth=2)
+plot(emaS, "Slow EMA", color=color.new(color.gray, 20), linewidth=2)
+
+plotshape(longCondition,
+     title    = "Long Signal",
+     location = location.belowbar,
+     color    = color.lime,
+     style    = shape.triangleup,
+     size     = size.normal,
+     text     = "LONG")
+
+plotshape(shortCondition,
+     title    = "Short Signal",
+     location = location.abovebar,
+     color    = color.red,
+     style    = shape.triangledown,
+     size     = size.normal,
+     text     = "SHORT")
+
+// v6 fix: resolve bgcolor color into a variable first, never inline ternary
+color bgColor = na
+if strategy.position_size > 0
+    bgColor := color.new(color.lime, 92)
+else if strategy.position_size < 0
+    bgColor := color.new(color.red, 92)
+bgcolor(bgColor, title="Position Background")
+
+// RSI panel
+plot(rsi, "RSI", display=display.pane, color=color.purple)
+hline(rsiOB, "Overbought", color=color.red,  linestyle=hline.style_dashed)
+hline(rsiOS, "Oversold",   color=color.lime, linestyle=hline.style_dashed)
+hline(50,    "Midline",    color=color.gray, linestyle=hline.style_dotted)
