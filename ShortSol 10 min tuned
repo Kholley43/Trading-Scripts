@@ -1,0 +1,212 @@
+//@version=6
+strategy(
+    title="UT Exact Shorts Only - Profit Tuned v2",
+    shorttitle="UT-Shorts-Tuned2",
+    overlay=true,
+    pyramiding=1,
+    default_qty_type=strategy.percent_of_equity,
+    default_qty_value=100,
+    initial_capital=2600,
+    commission_type=strategy.commission.percent,
+    commission_value=0.05,
+    process_orders_on_close=true,
+    calc_on_every_tick=false
+)
+
+// -------------------- User inputs --------------------
+enableEntries = input.bool(true, "Enable live entries")
+
+// UT settings
+utUseHA       = input.bool(false, "UT use Heikin Ashi source")
+utKeyVal      = input.float(1.0, "UT Key value (sensitivity)", step=0.1)
+utAtrPeriod   = input.int(10, "UT ATR period", minval=1)
+
+// Notional sizing (display only)
+margin_usd = input.float(200.0, "Margin per trade (USD)", minval=0)
+leverage   = input.int(15, "Leverage (x)", minval=1)
+
+// HTF bias
+requireHTFShort = input.bool(true, "Require HTF bearish bias")
+trendTf         = input.string("240", "HTF timeframe", options=["60", "120", "240"])
+htfFast         = input.int(50, "HTF fast EMA", minval=1)
+htfSlow         = input.int(200, "HTF slow EMA", minval=1)
+
+// LTF trend filter
+useLtfTrend      = input.bool(true, "Use local EMA trend filter")
+ltfFast          = input.int(20, "Local fast EMA", minval=1)
+ltfSlow          = input.int(50, "Local slow EMA", minval=1)
+usePullbackFilter = input.bool(true, "Require pullback into fast EMA")
+
+// RSI filter
+useRsiFilter = input.bool(true, "Use RSI confirmation")
+rsiLen       = input.int(14, "RSI length", minval=1)
+rsiShortMin  = input.int(40, "Min RSI for short", minval=1, maxval=100)
+rsiShortMax  = input.int(58, "Max RSI for short", minval=1, maxval=100)
+
+// Volume filter
+useVolFilter = input.bool(false, "Use volume confirmation")
+volMult      = input.float(1.2, "Volume multiplier", step=0.1, minval=0.1)
+
+// ADX filter
+useAdxFilter = input.bool(true, "Use ADX trend strength filter")
+adxLen       = input.int(14, "ADX length", minval=1)
+adxMin       = input.float(16.0, "Minimum ADX", step=0.5)
+
+// Risk management
+atrLen         = input.int(14, "ATR length (risk)", minval=1)
+stopAtrMult    = input.float(1.5, "Stop loss x ATR", step=0.1, minval=0.1)
+useTakeProfit  = input.bool(false, "Use fixed take profit")
+tpAtrMult      = input.float(2.8, "Take profit x ATR", step=0.1, minval=0.1)
+useTrailStop   = input.bool(true, "Trail stop with UT trail")
+useBreakEven   = input.bool(true, "Move stop to breakeven at 1R")
+beTriggerR     = input.float(0.9, "Breakeven trigger (R)", step=0.1, minval=0.1)
+trailActivateR = input.float(1.2, "Activate trailing stop at (R)", step=0.1, minval=0.1)
+useUtFlipExit  = input.bool(true, "Exit on UT buy signal")
+maxHoldHours   = input.float(8.0, "Max hold hours (0 = disabled)", step=0.5, minval=0)
+cooldownBars   = input.int(3, "Cooldown bars after exit", minval=0)
+
+// -------------------- Higher timeframe filter --------------------
+htfClose = request.security(syminfo.tickerid, trendTf, close, lookahead=barmerge.lookahead_off)
+htfEmaF  = request.security(syminfo.tickerid, trendTf, ta.ema(close, htfFast), lookahead=barmerge.lookahead_off)
+htfEmaS  = request.security(syminfo.tickerid, trendTf, ta.ema(close, htfSlow), lookahead=barmerge.lookahead_off)
+htfBear  = not requireHTFShort or (htfClose < htfEmaS and htfEmaF < htfEmaS)
+
+// -------------------- Actual HA source if selected --------------------
+haTicker = ticker.heikinashi(syminfo.tickerid)
+haSrc    = request.security(haTicker, timeframe.period, close, lookahead=barmerge.lookahead_off)
+src      = utUseHA ? haSrc : close
+
+// -------------------- UT Bot logic --------------------
+xATR  = ta.atr(utAtrPeriod)
+nLoss = utKeyVal * xATR
+
+var float xATRTrailingStop = na
+prevStop = nz(xATRTrailingStop[1], src)
+
+xATRTrailingStop := src > prevStop and src[1] > prevStop ? math.max(prevStop, src - nLoss) :
+     src < prevStop and src[1] < prevStop ? math.min(prevStop, src + nLoss) :
+     src > prevStop ? src - nLoss : src + nLoss
+
+utEma1 = ta.ema(src, 1)
+crossUp   = ta.crossover(utEma1, xATRTrailingStop)
+crossDown = ta.crossover(xATRTrailingStop, utEma1)
+
+utSellSignal = src < xATRTrailingStop and crossDown
+utBuySignal  = src > xATRTrailingStop and crossUp
+
+// -------------------- Confirmation filters --------------------
+ltfEmaF = ta.ema(close, ltfFast)
+ltfEmaS = ta.ema(close, ltfSlow)
+ltfBear = not useLtfTrend or (close < ltfEmaS and ltfEmaF < ltfEmaS)
+
+rsiVal = ta.rsi(close, rsiLen)
+rsiOk  = not useRsiFilter or (rsiVal >= rsiShortMin and rsiVal <= rsiShortMax)
+
+volBase = ta.sma(volume, 20)
+volOk   = not useVolFilter or volume > volBase * volMult
+
+// Pine exposes ADX via ta.dmi(), not ta.adx().
+[plusDI, minusDI, adxVal] = ta.dmi(adxLen, adxLen)
+adxOk = not useAdxFilter or adxVal >= adxMin
+pullbackOk = not usePullbackFilter or high >= ltfEmaF
+
+confirmations = htfBear and ltfBear and rsiOk and volOk and adxOk and pullbackOk
+
+// -------------------- Trade state --------------------
+atr = ta.atr(atrLen)
+notional = margin_usd * leverage
+notionalRounded = math.round(notional * 100.0) / 100.0
+
+var int entryBar = na
+var float atrAtEntry = na
+var int lastExitBar = na
+var label lastEntryLabel = na
+entryAlertMsg = "ENTRY FILLED - UT SHORT | {{ticker}} | {{interval}} | close={{close}}"
+utExitAlertMsg = "EXIT FILLED - UT BUY FLIP | {{ticker}} | {{interval}} | close={{close}}"
+maxHoldAlertMsg = "EXIT FILLED - MAX HOLD | {{ticker}} | {{interval}} | close={{close}}"
+
+secondsPerBar = timeframe.in_seconds()
+maxHoldBars = maxHoldHours > 0 and secondsPerBar > 0 ? int(math.ceil(maxHoldHours * 3600.0 / secondsPerBar)) : 0
+inMaxHold = strategy.position_size < 0 and not na(entryBar) and maxHoldBars > 0 and (bar_index - entryBar >= maxHoldBars)
+canTrade = na(lastExitBar) or (bar_index - lastExitBar > cooldownBars)
+
+justClosedShort = strategy.position_size == 0 and strategy.position_size[1] < 0
+if justClosedShort
+    lastExitBar := bar_index
+    entryBar := na
+    atrAtEntry := na
+    if not na(lastEntryLabel)
+        label.delete(lastEntryLabel)
+        lastEntryLabel := na
+
+// -------------------- Entry --------------------
+shouldEnterShort = enableEntries and utSellSignal and confirmations and canTrade and strategy.position_size == 0
+exitOnUtBuy = useUtFlipExit and utBuySignal and strategy.position_size < 0
+exitOnMaxHold = inMaxHold and strategy.position_size < 0
+
+alertcondition(shouldEnterShort, title="UT Short Entry", message="ENTRY FILLED - UT SHORT | {{ticker}} | {{interval}} | close={{close}}")
+alertcondition(exitOnUtBuy, title="UT Short Exit - UT Buy", message="EXIT FILLED - UT BUY FLIP | {{ticker}} | {{interval}} | close={{close}}")
+alertcondition(exitOnMaxHold, title="UT Short Exit - Max Hold", message="EXIT FILLED - MAX HOLD | {{ticker}} | {{interval}} | close={{close}}")
+
+if shouldEnterShort
+    strategy.entry(id="UT-Short", direction=strategy.short, comment="UT Short")
+    entryBar := bar_index
+    atrAtEntry := atr
+
+    if not na(lastEntryLabel)
+        label.delete(lastEntryLabel)
+
+    lblText = "UT Short\nnotional: $" + str.tostring(notionalRounded)
+    lastEntryLabel := label.new(
+         bar_index,
+         high,
+         text=lblText,
+         xloc=xloc.bar_index,
+         yloc=yloc.abovebar,
+         style=label.style_label_down,
+         color=color.new(color.red, 0),
+         textcolor=color.white,
+         size=size.small
+     )
+
+    alert(entryAlertMsg, alert.freq_once_per_bar_close)
+
+// -------------------- Position management --------------------
+if strategy.position_size < 0 and not na(atrAtEntry)
+    entryPrice = strategy.position_avg_price
+    riskDist = atrAtEntry * stopAtrMult
+
+    baseStop = entryPrice + riskDist
+    tpPrice = useTakeProfit ? entryPrice - (atrAtEntry * tpAtrMult) : na
+
+    profitR = riskDist > 0 ? (entryPrice - close) / riskDist : 0.0
+    managedStop = baseStop
+
+    if useBreakEven and profitR >= beTriggerR
+        managedStop := math.min(managedStop, entryPrice)
+
+    if useTrailStop and profitR >= trailActivateR
+        managedStop := math.min(managedStop, xATRTrailingStop)
+
+    finalStop = math.max(managedStop, high + syminfo.mintick)
+
+    strategy.exit(
+         id="UT-Short-Exit",
+         from_entry="UT-Short",
+         stop=finalStop,
+         limit=tpPrice
+     )
+
+if exitOnUtBuy
+    strategy.close("UT-Short", comment="UT Buy Exit")
+    alert(utExitAlertMsg, alert.freq_once_per_bar_close)
+
+if exitOnMaxHold
+    strategy.close("UT-Short", comment="Max Hold Exit")
+    alert(maxHoldAlertMsg, alert.freq_once_per_bar_close)
+
+// -------------------- Visuals --------------------
+plot(xATRTrailingStop, title="UT Trail", color=color.orange, linewidth=2)
+plot(ltfEmaS, title="Local Slow EMA", color=color.new(color.blue, 50))
+plotshape(utSellSignal and confirmations, title="Short Entry", location=location.abovebar, style=shape.labeldown, color=color.red, size=size.tiny, text="Sell")
+plotshape(utBuySignal, title="UT Buy", location=location.belowbar, style=shape.labelup, color=color.green, size=size.tiny, text="Buy")
