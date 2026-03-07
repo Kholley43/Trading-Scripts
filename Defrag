@@ -1,0 +1,102 @@
+SECURELY WIPE A MECHANICAL HARD DRIVE ON WINDOWS (DISKPART)
+===========================================================
+
+This guide shows how to completely erase a mechanical hard drive using only built‑in Windows tools.
+This process destroys all data on the selected disk. Double‑check the disk number before running any commands.
+
+-----------------------------------------------------------
+1. OPEN COMMAND PROMPT AS ADMINISTRATOR
+-----------------------------------------------------------
+1. Click Start
+2. Type: cmd
+3. Right‑click "Command Prompt"
+4. Select "Run as administrator"
+
+-----------------------------------------------------------
+2. START DISKPART
+-----------------------------------------------------------
+Type the following and press Enter:
+
+diskpart
+
+You should now see:
+DISKPART>
+
+-----------------------------------------------------------
+3. LIST ALL DISKS
+-----------------------------------------------------------
+Type:
+
+list disk
+
+You will see something like:
+
+Disk 0    476 GB
+Disk 1    931 GB
+
+Disk 0 is usually your Windows drive.
+Other disks (Disk 1, Disk 2, etc.) are the ones you may want to wipe.
+
+-----------------------------------------------------------
+4. IDENTIFY THE CORRECT DISK
+-----------------------------------------------------------
+Look at the size of the disk you want to erase.
+Make sure you know EXACTLY which disk number is correct.
+
+-----------------------------------------------------------
+5. SELECT THE TARGET DISK
+-----------------------------------------------------------
+Replace X with the correct disk number:
+
+select disk X
+
+Example:
+
+select disk 1
+
+DiskPart will confirm:
+"Disk 1 is now the selected disk."
+
+-----------------------------------------------------------
+6. SECURELY WIPE THE DISK (THIS ERASES EVERYTHING)
+-----------------------------------------------------------
+Type:
+
+clean all
+
+This command writes zeros to every sector on the disk.
+It can take hours on large mechanical drives.
+Do not close the window or turn off the PC while it runs.
+
+When finished, the disk will be completely blank.
+
+-----------------------------------------------------------
+7. OPTIONAL: CREATE A NEW PARTITION IF YOU WANT TO REUSE THE DRIVE
+-----------------------------------------------------------
+Type the following commands one at a time:
+
+create partition primary
+format fs=ntfs quick
+assign
+exit
+
+The drive is now clean, empty, and ready to use again.
+
+-----------------------------------------------------------
+8. SUMMARY OF COMMANDS
+-----------------------------------------------------------
+diskpart
+list disk
+select disk X
+clean all
+create partition primary   (optional)
+format fs=ntfs quick       (optional)
+assign                     (optional)
+exit
+
+-----------------------------------------------------------
+NOTES
+-----------------------------------------------------------
+- "clean all" is a secure wipe for mechanical hard drives.
+- This method protects privacy and prevents data recovery.
+- Be absolutely sure you select the correct disk number.
