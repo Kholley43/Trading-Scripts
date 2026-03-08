@@ -158,7 +158,7 @@ if strategy.position_size < 0 and not na(atrAtEntry)
     // After TP1: move to breakeven. After 1.5R: trail kicks in
     managedStop = entryPrice + riskDist
     if tp1Hit
-        managedStop := math.min(managedStop, entryPrice)
+        managedStop := math.min(managedStop, entryPrice - (syminfo.mintick * 10))
     if useTrailStop and profitR >= trailActivateR
         managedStop := math.min(managedStop, xATRTrailingStop)
 
