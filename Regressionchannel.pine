@@ -1,0 +1,133 @@
+//@version=6
+strategy("AE Regression Channel", overlay=true, fill_orders_on_standard_ohlc=true)
+
+// Inputs
+int_len             = input.int(200, "Regression Channel Length", group="Regression Channel")
+col_mid             = input.color(color.yellow, "Regression midline colour", group="Regression Channel")
+dev_inner_mult      = input.float(2.0, "Inner Deviation", group="Regression Channel")
+col_inner           = input.color(color.purple, "Inner channel colour", group="Regression Channel")
+dev_outer_mult      = input.float(2.5, "Outer Deviation", group="Regression Channel")
+col_outer           = input.color(color.lime, "Outer channel colour", group="Regression Channel")
+
+dbl_SLDelta         = input.float(2.0, "Stop Loss Delta multiplier", group="Trade Data")
+dbl_RRRMultiplier   = input.float(2.5, "Risk Reward Ratio Multiplier", group="Trade Data")
+
+int_ATRLength       = input.int(14, "ATR Length", group="ATR Filtering")
+bool_UseATR         = input.bool(true, "Use ATR?", group="ATR Filtering")
+
+// Stored trade visuals
+var float StoredEntry = na
+var float StoredSL    = na
+var float StoredTP    = na
+var line EntryLine    = na
+var line TPLine       = na
+var line SLLine       = na
+
+// ATR filter
+atrValue   = ta.atr(int_ATRLength)
+atrLow     = ta.lowest(atrValue, int_len)
+atrHigh    = ta.highest(atrValue, int_len)
+atrMidLow  = atrLow + (atrHigh - atrLow) * 0.30
+atrMidHigh = atrLow + (atrHigh - atrLow) * 0.70
+bool_ATROK = atrValue > atrMidLow and atrValue < atrMidHigh
+
+// True regression channel function
+f_reg_channel(src, length) =>
+    float sumX  = 0.0
+    float sumY  = 0.0
+    float sumXY = 0.0
+    float sumXX = 0.0
+
+    // Build regression from oldest -> newest
+    for i = 0 to length - 1
+        float x = i
+        float y = src[length - 1 - i]
+        sumX  += x
+        sumY  += y
+        sumXY += x * y
+        sumXX += x * x
+
+    float denom = length * sumXX - sumX * sumX
+    float slope = denom != 0 ? (length * sumXY - sumX * sumY) / denom : 0.0
+    float intercept = (sumY - slope * sumX) / length
+
+    // Current-bar regression value
+    float basis = intercept + slope * (length - 1)
+
+    // Residual deviation from fitted line
+    float residualSS = 0.0
+    for i = 0 to length - 1
+        float x = i
+        float y = src[length - 1 - i]
+        float fit = intercept + slope * x
+        float residual = y - fit
+        residualSS += residual * residual
+
+    float regDev = math.sqrt(residualSS / length)
+
+    [basis, regDev, slope]
+
+// Regression channel
+[basis, regDev, slope] = f_reg_channel(close, int_len)
+
+upperInner = basis + regDev * dev_inner_mult
+lowerInner = basis - regDev * dev_inner_mult
+
+upperOuter = basis + regDev * dev_outer_mult
+lowerOuter = basis - regDev * dev_outer_mult
+
+// Entry conditions
+// I changed long to use low[1] instead of high[1], which is almost certainly what you intended.
+long_condition  = bool_UseATR ? (bool_ATROK and low[1] < lowerInner[1] and close > lowerInner) : (low[1] < lowerInner[1] and close > lowerInner)
+short_condition = bool_UseATR ? (bool_ATROK and high[1] > upperInner[1] and close < upperInner) : (high[1] > upperInner[1] and close < upperInner)
+
+// Entries
+if long_condition
+    channelDiff = math.abs(upperOuter - upperInner) * 2.0
+    sl_price = close - channelDiff
+    risk_value = channelDiff
+    reward_value = risk_value * dbl_SLDelta
+    tp_price = close + reward_value
+
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Exit Long", "Long", stop=sl_price, limit=tp_price, comment_loss="SL " + str.tostring(sl_price), comment_profit="TP " + str.tostring(tp_price))
+
+    StoredEntry := close
+    StoredSL := sl_price
+    StoredTP := tp_price
+
+if short_condition
+    channelDiff = math.abs(lowerInner - lowerOuter) * 2.0
+    sl_price = close + channelDiff
+    risk_value = channelDiff
+    reward_value = risk_value * dbl_SLDelta
+    tp_price = close - reward_value
+
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Exit Short", "Short", stop=sl_price, limit=tp_price, comment_loss="SL " + str.tostring(sl_price), comment_profit="TP " + str.tostring(tp_price))
+
+    StoredEntry := close
+    StoredSL := sl_price
+    StoredTP := tp_price
+
+// Reset lines when flat
+if strategy.position_size == 0
+    StoredEntry := na
+    StoredSL := na
+    StoredTP := na
+    line.delete(EntryLine)
+    line.delete(TPLine)
+    line.delete(SLLine)
+
+// Draw live lines
+if strategy.opentrades > 0 and bar_index == strategy.opentrades.entry_bar_index(0)
+    EntryLine := line.new(bar_index, StoredEntry, bar_index + 1, StoredEntry, extend=extend.right, color=color.yellow, width=2)
+    TPLine := line.new(bar_index, StoredTP, bar_index + 1, StoredTP, extend=extend.right, color=color.orange, width=2)
+    SLLine := line.new(bar_index, StoredSL, bar_index + 1, StoredSL, extend=extend.right, color=color.purple, width=2)
+
+// Plots
+plot(basis, color=col_mid, linewidth=3, title="Regression Midline")
+plot(upperOuter, color=col_outer, linewidth=3, title="Outer Upper")
+plot(upperInner, color=col_inner, linewidth=3, title="Inner Upper")
+plot(lowerInner, color=col_inner, linewidth=3, title="Inner Lower")
+plot(lowerOuter, color=col_outer, linewidth=3, title="Outer Lower")
