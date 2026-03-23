@@ -1,0 +1,186 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © — richer OHLCV proxy (no request.footprint — Free/Plus friendly)
+
+//@version=6
+indicator("Volume zones + POC (no Premium)", overlay = true, max_lines_count = 20, max_bars_back = 500, max_labels_count = 50, max_boxes_count = 20)
+
+// --- What are your REAL options for “Bookmap / footprint” depth? ---
+// 1) TradingView Premium/Ultimate: use FootprintLevels_Premium.pine or TV’s built-in footprint chart type.
+// 2) Stay Free/Plus: this script + polish (below) — still NOT true order book or tick footprint.
+// 3) Other apps: Bookmap, Quantower, Sierra, Jigsaw — real DOM + heatmaps.
+// 4) MT5: DomProbeEA / EAs only if your broker exposes Market Depth for that symbol.
+
+int lookbackFast = input.int(50, "Fast lookback (reactive POC)", minval = 5, maxval = 500, group = "Zones")
+int lookbackSlow = input.int(200, "Slow lookback (structure POC)", minval = 10, maxval = 500, group = "Zones")
+bool showSlowPoc = input.bool(true, "Show slow POC line", group = "Zones")
+bool showVwap = input.bool(true, "Show session VWAP", group = "Zones")
+bool showRange = input.bool(true, "Show range high / low + fill", group = "Zones")
+bool showMidline = input.bool(true, "Show range midpoint", group = "Zones")
+int fillTransp = input.int(92, "Value zone fill transparency", minval = 70, maxval = 98, group = "Look")
+bool showTable = input.bool(true, "Show info table", group = "Look")
+bool showLastLabel = input.bool(true, "Label POC on last bar", group = "Look")
+bool showShapes = input.bool(true, "Triangles on chart: strict BUY/SELL bars", group = "Buy / Sell")
+bool showBanner = input.bool(true, "BUY/SELL banner on last bar", group = "Buy / Sell")
+string bannerSizeIn = input.string("normal", "Banner text size", options = ["tiny", "small", "normal", "large", "huge"], group = "Buy / Sell")
+bool showSimpleInTable = input.bool(true, "Table row: simple BUY/SELL vs fast POC", group = "Buy / Sell")
+
+// "Strict bias" = every enabled filter must agree (rare). This is NOT a probability or guarantee.
+bool showStrictBias = input.bool(true, "Show strict bias row in table", group = "Strict bias")
+bool biasReqAboveBothPoc = input.bool(true, "Long: close above BOTH POCs; Short: below BOTH", group = "Strict bias")
+bool biasReqVwap = input.bool(true, "Long: above VWAP; Short: below VWAP", group = "Strict bias")
+bool biasReqZoneExtreme = input.bool(true, "Long: close in top 25% of zone; Short: bottom 25%", group = "Strict bias")
+bool biasReqBarDir = input.bool(true, "Long: green candle; Short: red candle", group = "Strict bias")
+bool biasReqVolume = input.bool(true, "Volume > SMA(20) × mult", group = "Strict bias")
+float biasVolMult = input.float(1.05, "Volume multiplier vs SMA(20)", minval = 1.0, step = 0.05, group = "Strict bias")
+
+// --- POC from max-volume bar (loop-safe) ---
+f_pocFromVol(int len) =>
+    float poc = na
+    float maxV = na
+    int L = math.min(len, bar_index + 1)
+    if L > 0
+        for j = 0 to L - 1
+            float vj = volume[j]
+            if not na(vj) and (na(maxV) or vj >= maxV)
+                maxV := vj
+                poc := hlc3[j]
+    poc
+
+float pocFast = f_pocFromVol(lookbackFast)
+float pocSlow = f_pocFromVol(lookbackSlow)
+float rangeHigh = ta.highest(high, lookbackFast)
+float rangeLow = ta.lowest(low, lookbackFast)
+float rangeMid = (rangeHigh + rangeLow) * 0.5
+float zoneW = rangeHigh - rangeLow
+float bandTop = rangeHigh - zoneW * 0.25
+float bandBot = rangeLow + zoneW * 0.25
+float v = ta.vwap(hlc3)
+float volSma = ta.sma(volume, 20)
+
+// Strict directional bias: ALL enabled checks must pass (intentionally rare). Not predictive certainty.
+f_longStrict() =>
+    bool ok = true
+    if biasReqAboveBothPoc
+        ok := ok and close > pocFast and close > pocSlow
+    if biasReqVwap
+        ok := ok and not na(v) and close > v
+    if biasReqZoneExtreme
+        ok := ok and zoneW > syminfo.mintick and close >= bandTop
+    if biasReqBarDir
+        ok := ok and close > open
+    if biasReqVolume
+        ok := ok and not na(volSma) and volume > volSma * biasVolMult
+    ok
+
+f_shortStrict() =>
+    bool ok = true
+    if biasReqAboveBothPoc
+        ok := ok and close < pocFast and close < pocSlow
+    if biasReqVwap
+        ok := ok and not na(v) and close < v
+    if biasReqZoneExtreme
+        ok := ok and zoneW > syminfo.mintick and close <= bandBot
+    if biasReqBarDir
+        ok := ok and close < open
+    if biasReqVolume
+        ok := ok and not na(volSma) and volume > volSma * biasVolMult
+    ok
+
+bool strictLong = showStrictBias and f_longStrict()
+bool strictShort = showStrictBias and f_shortStrict()
+// If both true (flat zone / tie), show neutral
+bool biasLong = strictLong and not strictShort
+bool biasShort = strictShort and not strictLong
+
+pRH = plot(showRange ? rangeHigh : na, "Range high", color = color.new(color.red, 40), linewidth = 1)
+pRL = plot(showRange ? rangeLow : na, "Range low", color = color.new(color.green, 40), linewidth = 1)
+fill(pRH, pRL, color = color.new(color.teal, fillTransp), title = "Value zone (proxy)")
+
+plot(pocFast, "POC fast", color = color.new(color.orange, 0), linewidth = 2)
+plot(showSlowPoc ? pocSlow : na, "POC slow", color = color.new(color.fuchsia, 20), linewidth = 1, style = plot.style_circles)
+plot(showMidline ? rangeMid : na, "Range mid", color = color.new(color.gray, 50), linewidth = 1, style = plot.style_circles)
+plot(showVwap ? v : na, "Session VWAP", color = color.new(color.blue, 35), linewidth = 1)
+
+// Simple tilt: price vs fast POC only (you will almost always see BUY or SELL here)
+bool simpleBuy = not na(pocFast) and close > pocFast
+bool simpleSell = not na(pocFast) and close < pocFast
+
+plotshape(showShapes and biasLong, title = "STRICT BUY", style = shape.triangleup, location = location.belowbar, color = color.new(color.lime, 0), size = size.normal)
+plotshape(showShapes and biasShort, title = "STRICT SELL", style = shape.triangledown, location = location.abovebar, color = color.new(color.red, 0), size = size.normal)
+
+// --- Small table (last bar) ---
+var table t = na
+if showTable and barstate.islast
+    if na(t)
+        t := table.new(position.top_right, 2, 10, bgcolor = color.new(color.black, 85), border_width = 1)
+    // Top rows: obvious BUY / SELL
+    if showSimpleInTable
+        table.cell(t, 0, 0, "Simple (vs POC)", text_color = color.yellow, text_size = size.normal)
+        table.cell(t, 1, 0, simpleBuy ? "BUY" : simpleSell ? "SELL" : "FLAT", text_color = simpleBuy ? color.lime : simpleSell ? color.red : color.gray, text_size = size.large)
+    else
+        table.cell(t, 0, 0, "Simple", text_color = color.gray, text_size = size.small)
+        table.cell(t, 1, 0, "(off)", text_color = color.gray, text_size = size.small)
+    string strictTxt = "—"
+    color strictCol = color.gray
+    if not showStrictBias
+        strictTxt := "(strict off)"
+    else if biasLong
+        strictTxt := "BUY (strict)"
+        strictCol := color.lime
+    else if biasShort
+        strictTxt := "SELL (strict)"
+        strictCol := color.red
+    else
+        strictTxt := "WAIT (strict)"
+        strictCol := color.silver
+    table.cell(t, 0, 1, "Strict (all on)", text_color = color.white, text_size = size.small)
+    table.cell(t, 1, 1, strictTxt, text_color = strictCol, text_size = size.normal)
+    table.cell(t, 0, 2, "POC fast", text_color = color.white, text_size = size.small)
+    table.cell(t, 1, 2, str.tostring(pocFast, format.mintick), text_color = color.orange, text_size = size.small)
+    table.cell(t, 0, 3, "POC slow", text_color = color.white, text_size = size.small)
+    table.cell(t, 1, 3, str.tostring(pocSlow, format.mintick), text_color = color.fuchsia, text_size = size.small)
+    table.cell(t, 0, 4, "Zone high", text_color = color.white, text_size = size.small)
+    table.cell(t, 1, 4, str.tostring(rangeHigh, format.mintick), text_color = color.red, text_size = size.small)
+    table.cell(t, 0, 5, "Zone low", text_color = color.white, text_size = size.small)
+    table.cell(t, 1, 5, str.tostring(rangeLow, format.mintick), text_color = color.green, text_size = size.small)
+    table.cell(t, 0, 6, "Zone width", text_color = color.white, text_size = size.small)
+    table.cell(t, 1, 6, str.tostring(rangeHigh - rangeLow, format.mintick), text_color = color.gray, text_size = size.small)
+    table.cell(t, 0, 7, "Close − POC", text_color = color.white, text_size = size.small)
+    table.cell(t, 1, 7, str.tostring(close - pocFast, format.mintick), text_color = close >= pocFast ? color.lime : color.red, text_size = size.small)
+    table.cell(t, 0, 8, "Disclaimer", text_color = color.gray, text_size = size.tiny)
+    table.cell(t, 1, 8, "Not advice; not guaranteed", text_color = color.orange, text_size = size.tiny)
+    table.cell(t, 0, 9, "Data", text_color = color.gray, text_size = size.tiny)
+    table.cell(t, 1, 9, "OHLCV proxy — not DOM", text_color = color.gray, text_size = size.tiny)
+
+var label pocLb = na
+if showLastLabel and barstate.islast and not na(pocFast)
+    string txt = "POC\n" + str.tostring(pocFast, format.mintick)
+    if na(pocLb)
+        pocLb := label.new(bar_index, pocFast, txt, style = label.style_label_left, color = color.new(color.orange, 60), textcolor = color.white, size = size.small)
+    else
+        label.set_xy(pocLb, bar_index, pocFast)
+        label.set_text(pocLb, txt)
+
+// Banner on last bar — "simple" = only close vs fast POC (strict filters not all true). "strict" = every filter passed.
+var label bannerLb = na
+f_bannerSize() =>
+    bannerSizeIn == "tiny" ? size.tiny : bannerSizeIn == "small" ? size.small : bannerSizeIn == "large" ? size.large : bannerSizeIn == "huge" ? size.huge : size.normal
+
+if showBanner and barstate.islast
+    string btxt = biasLong ? "BUY (strict)" : biasShort ? "SELL (strict)" : simpleBuy ? "BUY vs POC" : simpleSell ? "SELL vs POC" : "FLAT"
+    bool banGreen = biasLong or (not biasLong and not biasShort and simpleBuy)
+    bool banRed = biasShort or (not biasLong and not biasShort and simpleSell)
+    color bbg = banGreen ? color.new(color.green, 35) : banRed ? color.new(color.red, 35) : color.new(color.gray, 60)
+    color bfg = color.white
+    sz = f_bannerSize()
+    if na(bannerLb)
+        bannerLb := label.new(bar_index, high, btxt, yloc = yloc.abovebar, style = label.style_label_down, color = bbg, textcolor = bfg, size = sz)
+    else
+        label.set_xy(bannerLb, bar_index, high)
+        label.set_text(bannerLb, btxt)
+        label.set_color(bannerLb, bbg)
+        label.set_textcolor(bannerLb, bfg)
+        label.set_size(bannerLb, sz)
+else if not showBanner and not na(bannerLb)
+    label.delete(bannerLb)
+    bannerLb := na
