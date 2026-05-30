@@ -1,0 +1,38 @@
+StreamCleanup
+Automatic memory & cache cleaner for Windows 11 streaming machines. Built for setups running Tape Surf + NinjaTrader + OBS together.
+
+Setup (one time only)
+
+Copy StreamCleanup.ps1 to anywhere on the remote machine
+Right-click the file → Run as Administrator
+It installs itself as a Windows scheduled task and closes
+Done — it will now run automatically in the background every 45 minutes
+
+
+What it cleans
+TargetDetailsWindows Temp folders%TEMP%, %TMP%, C:\Windows\TempOpera browser cacheClears accumulated cache from the OBS browser sessionWindows PrefetchSafe to clear, Windows rebuilds it automaticallyDNS cacheFlushed via ipconfig /flushdnsDelivery Optimisation cacheWindows Update background cacheRecycle BinEmptied silentlyStandby memoryFlushes RAM held by idle background processes
+What it will NOT touch
+
+Tape Surf
+NinjaTrader / Ninja
+OBS / obs64
+Opera (the running process itself — only its cache folder)
+
+
+Changing the interval
+Open StreamCleanup.ps1 in Notepad and change this line near the top:
+$IntervalMinutes = 45
+Then uninstall the old task (see below) and re-run the script as Administrator to reinstall with the new interval.
+
+Logs
+Every run writes to StreamCleanup.log in the same folder as the script. Check this to see how much memory is being freed each cycle.
+
+Uninstalling
+Open PowerShell as Administrator and run:
+powershellUnregister-ScheduledTask -TaskName "StreamMemoryCleanup" -Confirm:$false
+
+Requirements
+
+Windows 11
+PowerShell 5.1+ (built into Windows 11)
+Must be run as Administrator on first install only
